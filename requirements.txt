@@ -1,0 +1,17 @@
+# Motor (Parte 1)
+google-genai>=1.0.0
+
+# Voz local (Parte 3)
+sounddevice
+numpy
+faster-whisper
+pyttsx3
+
+# Gestos por cámara (opcional)
+opencv-python
+mediapipe==0.10.35
+
+# Integración opcional con Google Calendar (usada por plan_hoy)
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib

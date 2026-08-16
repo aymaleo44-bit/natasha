@@ -1,0 +1,24 @@
+# Entornos virtuales
+.venv/
+venv/
+env/
+ENV/
+
+# Cache de Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Variables de entorno y credenciales sensibles
+.env
+credentials.json
+token.pickle
+
+# Archivos de sistema / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+Thumbs.db
+Desktop.ini
