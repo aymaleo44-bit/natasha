@@ -6,6 +6,11 @@ function calling automático para decidir qué habilidad o acción ejecutar.
 Si no hay GEMINI_API_KEY configurada, o falta el SDK, cae a un enrutador
 local por patrones (modo offline) para que Natasha nunca deje de
 responder a las órdenes básicas de escritorio.
+
+Optimizaciones:
+  - Regexes compilados una sola vez al importar el módulo.
+  - System instruction cacheada (se regenera solo si cambian las habilidades).
+  - Historial limitado a 30 entradas para reducir tokens enviados.
 """
 import os
 import re
@@ -96,13 +101,19 @@ class MotorNatasha:
             abrir, cerrar_aplicacion, crear_carpeta_escritorio,
             guardar_nota_boveda, buscar_en_boveda, ejecutar_habilidad,
         ]
+        # Caché de system instruction (se regenera solo si hay cambios)
+        self._cached_system_instruction = None
+        self._cached_skills_hash = None
 
     def _system_instruction(self):
         habilidades = listar_habilidades()
+        skills_hash = tuple(h['nombre'] for h in habilidades)
+        if skills_hash == self._cached_skills_hash and self._cached_system_instruction:
+            return self._cached_system_instruction
         lista_habilidades = "\n".join(
             f"- {h['nombre']}: {h['descripcion']}" for h in habilidades
         ) or "(no hay habilidades cargadas en /skills)"
-        return (
+        self._cached_system_instruction = (
             "Eres Natasha, un asistente de escritorio local estilo JARVIS que "
             "habla español. Eres directa, breve, y ejecutas acciones reales "
             "sobre el equipo del usuario usando las funciones disponibles: "
@@ -115,6 +126,8 @@ class MotorNatasha:
             "correspondiente y confirma el resultado de forma breve, apta "
             "para ser leída en voz alta."
         )
+        self._cached_skills_hash = skills_hash
+        return self._cached_system_instruction
 
     def consultar(self, texto_usuario: str) -> str:
         """Punto de entrada principal: decide y ejecuta usando Gemini, o el
@@ -163,8 +176,8 @@ class MotorNatasha:
             )
             texto = (respuesta.text or "").strip() or "Listo."
             self.historial.append({"role": "model", "parts": [{"text": texto}]})
-            if len(self.historial) > 40:
-                self.historial = self.historial[-40:]
+            if len(self.historial) > 30:
+                self.historial = self.historial[-30:]
             return texto
         except Exception as e:
             err_str = str(e)
@@ -177,30 +190,39 @@ class MotorNatasha:
                         "y colocarla en tu archivo .env.")
             return f"Tuve un problema hablando con Gemini ({e}). Revisa tu API key o intenta de nuevo."
 
+    # --- Regexes compilados (evita re-compilar en cada llamada) ---
+    _RE_NATASHA = re.compile(r"^(oye\s+|hey\s+)?natasha[,\s]*", re.IGNORECASE)
+    _RE_CARPETA = re.compile(
+        r"(?:crea|crear|haz|hacer)\s+(?:una\s+)?carpeta\s+"
+        r"(?:llamada\s+|con\s+el\s+nombre\s+|de\s+nombre\s+|nombrada\s+)?"
+        r"[\"']?([a-záéíóúñ0-9_\-\s]+?)[\"']?\s*(?:en\s+el\s+escritorio|en\s+escritorio)?$"
+    )
+    _RE_CERRAR = re.compile(r"^cierra(?:r)?\s+(?:el\s+|la\s+|los\s+|las\s+)?(.+)$")
+    _RE_ABRIR = re.compile(r"^abr(?:e|ir)\s+(?:el\s+|la\s+|los\s+|las\s+)?(.+)$")
+    _RE_EJECUTAR = re.compile(r"^(ejecuta|corre|realiza)\s+(?:la\s+habilidad\s+)?(.+)$")
+    _RE_NOTA = re.compile(r"^(?:guardar?|anota|agrega(?:r)?)\s+(?:una\s+)?nota\s+(?:en\s+la\s+b[oó]veda\s+)?(?:que\s+diga|titulada|sobre|con)?\s*(.+)$")
+    _RE_BUSCAR = re.compile(r"^(?:buscar?|encuentra|consulta)\s+(?:en\s+la\s+b[oó]veda\s+|en\s+notas\s+)?(.+)$")
+    _RE_SUFIJOS = re.compile(r"\s+(en el navegador|por favor)$")
+
     # --- Enrutador local: cubre las acciones de escritorio sin Gemini ---
     def _consultar_offline(self, texto_usuario: str) -> str:
         texto = texto_usuario.lower().strip()
-        texto = re.sub(r"^(oye\s+|hey\s+)?natasha[,\s]*", "", texto).strip()
+        texto = self._RE_NATASHA.sub("", texto).strip()
 
-        m = re.search(
-            r"(?:crea|crear|haz|hacer)\s+(?:una\s+)?carpeta\s+"
-            r"(?:llamada\s+|con\s+el\s+nombre\s+|de\s+nombre\s+|nombrada\s+)?"
-            r"[\"']?([a-záéíóúñ0-9_\-\s]+?)[\"']?\s*(?:en\s+el\s+escritorio|en\s+escritorio)?$",
-            texto
-        )
+        m = self._RE_CARPETA.search(texto)
         if m and m.group(1).strip():
             return crear_carpeta_escritorio(m.group(1).strip())
 
-        m = re.search(r"^cierra(?:r)?\s+(?:el\s+|la\s+|los\s+|las\s+)?(.+)$", texto)
+        m = self._RE_CERRAR.search(texto)
         if m and m.group(1).strip():
             return cerrar_aplicacion(m.group(1).strip())
 
-        m = re.search(r"^abr(?:e|ir)\s+(?:el\s+|la\s+|los\s+|las\s+)?(.+)$", texto)
+        m = self._RE_ABRIR.search(texto)
         if m and m.group(1).strip():
-            objetivo = re.sub(r"\s+(en el navegador|por favor)$", "", m.group(1).strip())
+            objetivo = self._RE_SUFIJOS.sub("", m.group(1).strip())
             return abrir(objetivo)
 
-        m = re.search(r"^(ejecuta|corre|realiza)\s+(?:la\s+habilidad\s+)?(.+)$", texto)
+        m = self._RE_EJECUTAR.search(texto)
         if m and m.group(2).strip():
             return ejecutar_habilidad(m.group(2).strip())
 
@@ -210,12 +232,12 @@ class MotorNatasha:
         if leer_habilidad(texto):
             return ejecutar_habilidad(texto)
 
-        m = re.search(r"^(?:guardar?|anota|agrega(?:r)?)\s+(?:una\s+)?nota\s+(?:en\s+la\s+b[oó]veda\s+)?(?:que\s+diga|titulada|sobre|con)?\s*(.+)$", texto)
+        m = self._RE_NOTA.search(texto)
         if m and m.group(1).strip():
             contenido = m.group(1).strip()
             return guardar_nota_boveda("raw", f"Nota {contenido[:20]}", contenido)
 
-        m = re.search(r"^(?:buscar?|encuentra|consulta)\s+(?:en\s+la\s+b[oó]veda\s+|en\s+notas\s+)?(.+)$", texto)
+        m = self._RE_BUSCAR.search(texto)
         if m and m.group(1).strip():
             return buscar_en_boveda(m.group(1).strip())
 
